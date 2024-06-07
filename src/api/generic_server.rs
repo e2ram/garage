@@ -1,7 +1,8 @@
 use std::convert::Infallible;
-use std::fs::{self, Permissions};
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::{os::unix::fs::PermissionsExt, fs::{self, Permissions}};
 
 use async_trait::async_trait;
 
@@ -17,8 +18,11 @@ use hyper::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
+
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 
 use opentelemetry::{
 	global,
@@ -117,21 +121,29 @@ impl<A: ApiHandler> ApiServer<A> {
 				let handler = move |request, socketaddr| self.clone().handler(request, socketaddr);
 				server_loop(server_name, listener, handler, must_exit).await
 			}
-			UnixOrTCPSocketAddress::UnixSocket(ref path) => {
-				if path.exists() {
-					fs::remove_file(path)?
+			UnixOrTCPSocketAddress::UnixSocket(ref _path) => {
+				#[cfg(unix)]
+				{
+					if path.exists() {
+						fs::remove_file(path)?
+					}
+	
+					let listener = UnixListener::bind(path)?;
+					let listener = UnixListenerOn(listener, path.display().to_string());
+	
+					fs::set_permissions(
+						path,
+						Permissions::from_mode(unix_bind_addr_mode.unwrap_or(0o222)),
+					)?;
+	
+					let handler = move |request, socketaddr| self.clone().handler(request, socketaddr);
+					server_loop(server_name, listener, handler, must_exit).await
 				}
-
-				let listener = UnixListener::bind(path)?;
-				let listener = UnixListenerOn(listener, path.display().to_string());
-
-				fs::set_permissions(
-					path,
-					Permissions::from_mode(unix_bind_addr_mode.unwrap_or(0o222)),
-				)?;
-
-				let handler = move |request, socketaddr| self.clone().handler(request, socketaddr);
-				server_loop(server_name, listener, handler, must_exit).await
+				#[cfg(not(unix))]
+				{
+					let _ = unix_bind_addr_mode;
+					Err(GarageError::NoPlatformSupport("Unix sockets".into()))
+				}
 			}
 		}
 	}
@@ -262,8 +274,10 @@ impl Accept for TcpListener {
 	}
 }
 
+#[cfg(unix)]
 pub struct UnixListenerOn(pub UnixListener, pub String);
 
+#[cfg(unix)]
 #[async_trait]
 impl Accept for UnixListenerOn {
 	type Stream = UnixStream;

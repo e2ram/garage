@@ -786,6 +786,7 @@ impl BlockManagerLocked {
 			fs::remove_file(to_delete).await?;
 		}
 
+		#[cfg(unix)]
 		if mgr.data_fsync {
 			// We want to ensure that when this function returns, data is properly persisted
 			// to disk. The first step is the sync_all above that does an fsync on the data file.

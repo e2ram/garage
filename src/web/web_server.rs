@@ -1,9 +1,13 @@
-use std::fs::{self, Permissions};
-use std::os::unix::prelude::PermissionsExt;
 use std::{convert::Infallible, sync::Arc};
 
-use tokio::net::{TcpListener, UnixListener};
+#[cfg(unix)]
+use std::{fs::{self, Permissions}, os::unix::prelude::PermissionsExt};
+
+use tokio::net::TcpListener;
 use tokio::sync::watch;
+
+#[cfg(unix)]
+use tokio::net::UnixListener;
 
 use hyper::{
 	body::Incoming as IncomingBody,
@@ -20,13 +24,16 @@ use opentelemetry::{
 
 use crate::error::*;
 
-use garage_api::generic_server::{server_loop, UnixListenerOn};
+use garage_api::generic_server::server_loop;
 use garage_api::helpers::*;
 use garage_api::s3::cors::{add_cors_headers, find_matching_cors_rule, handle_options_for_bucket};
 use garage_api::s3::error::{
 	CommonErrorDerivative, Error as ApiError, OkOrBadRequest, OkOrInternalError,
 };
 use garage_api::s3::get::{handle_get_without_ctx, handle_head_without_ctx};
+
+#[cfg(unix)]
+use garage_api::generic_server::UnixListenerOn;
 
 use garage_model::garage::Garage;
 
@@ -97,18 +104,26 @@ impl WebServer {
 				server_loop(server_name, listener, handler, must_exit).await
 			}
 			UnixOrTCPSocketAddress::UnixSocket(ref path) => {
-				if path.exists() {
-					fs::remove_file(path)?
+				#[cfg(unix)]
+				{
+					if path.exists() {
+						fs::remove_file(path)?
+					}
+
+					let listener = UnixListener::bind(path)?;
+					let listener = UnixListenerOn(listener, path.display().to_string());
+
+					fs::set_permissions(path, Permissions::from_mode(0o222))?;
+
+					let handler =
+						move |stream, socketaddr| self.clone().handle_request(stream, socketaddr);
+					server_loop(server_name, listener, handler, must_exit).await
 				}
-
-				let listener = UnixListener::bind(path)?;
-				let listener = UnixListenerOn(listener, path.display().to_string());
-
-				fs::set_permissions(path, Permissions::from_mode(0o222))?;
-
-				let handler =
-					move |stream, socketaddr| self.clone().handle_request(stream, socketaddr);
-				server_loop(server_name, listener, handler, must_exit).await
+				#[cfg(not(unix))]
+				{
+					let _ = path;
+					Err(GarageError::NoPlatformSupport("Unix sockets".into()))
+				}
 			}
 		}
 	}

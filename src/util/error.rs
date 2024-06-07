@@ -73,6 +73,9 @@ pub enum Error {
 	#[error(display = "Missing block {:?}: no node returned a valid block", _0)]
 	MissingBlock(Hash),
 
+	#[error(display = "Missing platform support for {:?}", _0)]
+	NoPlatformSupport(String),
+
 	#[error(display = "{}", _0)]
 	Message(String),
 }

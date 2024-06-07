@@ -219,11 +219,16 @@ pub fn gen_node_key(metadata_dir: &Path) -> Result<NodeKey, Error> {
 		let (pubkey, key) = ed25519::gen_keypair();
 
 		{
-			use std::os::unix::fs::PermissionsExt;
 			let mut f = std::fs::File::create(key_file.as_path())?;
-			let mut perm = f.metadata()?.permissions();
-			perm.set_mode(0o600);
-			std::fs::set_permissions(key_file.as_path(), perm)?;
+
+			#[cfg(unix)]
+			{
+				use std::os::unix::fs::PermissionsExt;
+				let mut perm = f.metadata()?.permissions();
+				perm.set_mode(0o600);
+				std::fs::set_permissions(key_file.as_path(), perm)?;
+			}
+
 			f.write_all(&key[..])?;
 		}
 
@@ -806,15 +811,51 @@ impl NodeStatus {
 	}
 
 	fn update_disk_usage(&mut self, meta_dir: &Path, data_dir: &DataDirEnum) {
-		use nix::sys::statvfs::statvfs;
-		let mount_avail = |path: &Path| match statvfs(path) {
-			Ok(x) => {
-				let avail = x.blocks_available() as u64 * x.fragment_size() as u64;
-				let total = x.blocks() as u64 * x.fragment_size() as u64;
-				Some((x.filesystem_id(), avail, total))
+		#[cfg(unix)]
+		fn mount_avail(path: &Path) -> Option<(u64, u64, u64)> {
+			match nix::sys::statvfs::statvfs(path) {
+				Ok(x) => {
+					let avail = x.blocks_available() as u64 * x.fragment_size() as u64;
+					let total = x.blocks() as u64 * x.fragment_size() as u64;
+					Some((x.filesystem_id() as u64, avail, total))
+				}
+				Err(_) => None,
 			}
-			Err(_) => None,
-		};
+		}
+
+		#[cfg(target_os = "windows")]
+		fn mount_avail(path: &Path) -> Option<(u64, u64, u64)> {
+			use std::hash::{DefaultHasher, Hash, Hasher};
+
+			let canonical_path = path.canonicalize().ok()?;
+			let path_root = canonical_path.ancestors().last()?;
+
+			let disks = sysinfo::Disks::new_with_refreshed_list();
+			
+			// find the disk that the provided path belongs to
+			let disk = disks
+			.list()
+			.iter()
+			.filter(|disk| {
+				dbg!(disk.mount_point());
+				if let Some(canonicalized_mount_point_path) = disk.mount_point().canonicalize().ok() {
+					canonicalized_mount_point_path.ancestors().last().unwrap() == path_root
+				} else {
+					false
+				}
+			})
+			.next()?;
+
+			let avail = disk.available_space();
+			let total = disk.total_space();
+
+			// obtain an unique id for this disk by hashing the disk mount point
+			let mut id_hasher = DefaultHasher::new();
+			disk.mount_point().hash(&mut id_hasher);
+			let id = id_hasher.finish();
+
+			Some((id, avail, total))
+		}
 
 		self.meta_disk_avail = mount_avail(meta_dir).map(|(_, a, t)| (a, t));
 		self.data_disk_avail = match data_dir {
